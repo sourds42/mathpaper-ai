@@ -1,0 +1,39 @@
+{
+  "retrieval": {
+    "Fixed chunks + dense (baseline)": {
+      "recall@3": 0.875,
+      "mrr": 0.818
+    },
+    "Eq-anchored + dense": {
+      "recall@3": 0.938,
+      "mrr": 0.856
+    },
+    "Eq-anchored + BM25": {
+      "recall@3": 0.938,
+      "mrr": 0.859
+    },
+    "Eq-anchored + hybrid (RRF)": {
+      "recall@3": 0.938,
+      "mrr": 0.856
+    }
+  },
+  "orchestration": {
+    "variable_lookup": {
+      "before": 7,
+      "after": 3
+    },
+    "equation_explanation": {
+      "before": 7,
+      "after": 5
+    },
+    "concept_comparison": {
+      "before": 7,
+      "after": 6
+    },
+    "derivation": {
+      "before": 7,
+      "after": 7
+    }
+  },
+  "note": "Toy benchmark: 15-chunk corpus, 16 labeled queries. Dense retriever is a TF-IDF stand-in for bge-large."
+}
