@@ -69,6 +69,21 @@ installs everything, and has ready-to-run cells for: the offline benchmark, the
 free-cloud-API pipeline (Groq), and local models on Colab's free T4 GPU. Ideal if
 your own machine is low on RAM/VRAM.
 
+### Host a live web demo (Gradio, from Colab)
+
+`app.py` is a Gradio web UI for the pipeline. In your Colab notebook, after the
+setup + Ollama cells:
+
+```python
+!pip install -q gradio
+import os
+os.environ["LLM_PROVIDER"] = "ollama"
+!python app.py          # prints a public *.gradio.live link, live while the session runs
+```
+
+Share the printed URL for a working, interactive demo — question in, agent trace
+and answer out, with LaTeX rendering.
+
 ### End-to-end with a free LLM provider
 
 The agent layer is provider-agnostic (`src/mathpaper/llm.py`). Get a free key —
