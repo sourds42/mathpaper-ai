@@ -11,6 +11,7 @@ import json
 import re
 
 from .retrieval import HybridRetriever
+from .tools import wikipedia_lookup
 
 
 # ----------------------------------------------------------------------
@@ -140,7 +141,11 @@ class PaperRetrievalAgent:
 
 
 class MathKnowledgeAgent:
-    """Fills prerequisite gaps the paper assumes (e.g. KL divergence definition)."""
+    """Fills prerequisite gaps the paper assumes (e.g. KL divergence definition).
+
+    Prefers a REAL external source (Wikipedia) over the LLM's memory, so the
+    definition is grounded and attributable. Falls back to the LLM only if the
+    lookup returns nothing (offline, obscure concept, etc.)."""
 
     SYSTEM = (
         "You are a mathematical reference. Give a precise, textbook-style "
@@ -148,10 +153,25 @@ class MathKnowledgeAgent:
     )
 
     def run(self, state: AgentState) -> AgentState:
+        grounded, invented = 0, 0
         for concept in state.missing:
-            definition = call_llm(self.SYSTEM, concept, model="strong")
-            state.external_knowledge.append({"concept": concept, "text": definition})
-        state.log("MathKnowledge", f"filled {len(state.missing)} gaps")
+            hit = wikipedia_lookup(concept)
+            if hit:
+                state.external_knowledge.append({
+                    "concept": concept, "text": hit["text"],
+                    "source": hit["source"],
+                })
+                grounded += 1
+            else:
+                # fallback: LLM definition, clearly marked as unsourced
+                definition = call_llm(self.SYSTEM, concept, model="strong")
+                state.external_knowledge.append({
+                    "concept": concept, "text": definition,
+                    "source": "LLM (no external source found)",
+                })
+                invented += 1
+        state.log("MathKnowledge",
+                  f"{grounded} from Wikipedia, {invented} from LLM fallback")
         state.missing = []
         return state
 

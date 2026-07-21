@@ -180,6 +180,7 @@ src/mathpaper/
   llm.py          provider-agnostic LLM adapter (stdlib only)
   ingest.py       PDF -> equation-anchored corpus (upload your own paper)
   evaluation.py   reference-free answer scoring (faithfulness / groundedness)
+  tools.py        external reference lookup (Wikipedia) for the Math Knowledge Agent
 tests/            orchestration, ingestion, and scoring tests (no key needed)
 app.py            Gradio web demo: ask, compare, evaluate
 evaluate.py       retrieval + orchestration benchmark
@@ -193,9 +194,11 @@ results/          benchmark output (json + charts)
 ## How it works (interview notes)
 
 - **Agents** are LLMs with focused roles that make decisions (the planner routes,
-  the verifier blocks). **Tools** are what they call (vector search, BM25,
-  reranker, external references). **Memory** is shared working state (`AgentState`)
-  plus conversation history for follow-ups.
+  the verifier blocks). **Tools** are what they call: vector search, BM25,
+  reranker, and a real **Wikipedia lookup** so the Math Knowledge Agent grounds
+  prerequisite definitions in an external source (with citation) instead of
+  inventing them. **Memory** is shared working state (`AgentState`) plus
+  conversation history for follow-ups.
 - **Model routing:** classification and memory use a small/fast model; planning,
   verification, and explanation use a stronger reasoning model — a deliberate
   cost/quality split, configurable per provider.
