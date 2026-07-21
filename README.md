@@ -74,7 +74,8 @@ your own machine is low on RAM/VRAM.
 `app.py` is a Gradio web UI for the pipeline with three features:
 **(1)** upload your own paper (PDF) instead of the built-in demo,
 **(2)** live agent status — watch each agent fire in the backend,
-**(3)** compare two models side-by-side on the same question.
+**(3)** compare two models side-by-side, and
+**(4)** an **Evaluate** tab that scores multiple models across a question set on reference-free faithfulness/groundedness metrics and ranks them.
 
 In your Colab notebook, after the setup + Ollama cells:
 
