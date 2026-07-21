@@ -11,6 +11,7 @@ the agents a given query actually needs.
 ![CI](https://github.com/YOUR_USERNAME/mathpaper-ai/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_USERNAME/mathpaper-ai/blob/main/MathPaper_AI_Colab.ipynb)
 
 ---
 
@@ -58,6 +59,13 @@ pip install -e ".[dev]"
 pytest tests/ -v        # orchestration tests with a mocked LLM
 python evaluate.py      # retrieval benchmark + charts in results/
 ```
+
+### Run on Google Colab (no local hardware needed)
+
+Open `MathPaper_AI_Colab.ipynb` in Colab (badge above). It clones the repo,
+installs everything, and has ready-to-run cells for: the offline benchmark, the
+free-cloud-API pipeline (Groq), and local models on Colab's free T4 GPU. Ideal if
+your own machine is low on RAM/VRAM.
 
 ### End-to-end with a free LLM provider
 
