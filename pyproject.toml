@@ -17,10 +17,8 @@ dependencies = [
     "matplotlib>=3.7",
 ]
 
-[project.optional-dependencies-note]
-# pip install -e ".[app]" for the web demo + PDF upload
-
 [project.optional-dependencies]
+# pip install -e ".[app]" for the web demo + PDF upload
 dev = ["pytest>=7.0", "pymupdf>=1.24"]
 app = ["gradio>=4.0", "pymupdf>=1.24"]
 
