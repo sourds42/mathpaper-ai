@@ -43,8 +43,12 @@ PROVIDER = os.environ.get("LLM_PROVIDER", "ollama")
 
 # Model choices offered in the UI. For Ollama these are tags you've pulled.
 if PROVIDER == "ollama":
-    MODEL_CHOICES = ["qwen2.5:7b", "llama3.2:3b", "qwen2.5:3b", "gemma3:4b"]
-    DEFAULT_A, DEFAULT_B = "qwen2.5:7b", "llama3.2:3b"
+    MODEL_CHOICES = [
+        "qwen2.5:7b", "llama3.2:3b", "qwen2.5:3b", "qwen2.5:14b",
+        "deepseek-r1:7b", "deepseek-r1:8b", "deepseek-r1:14b",
+        "gemma3:4b", "gemma3:12b", "phi4-mini", "mistral", "llama3.1:8b",
+    ]
+    DEFAULT_A, DEFAULT_B = "qwen2.5:7b", "deepseek-r1:7b"
 else:
     MODEL_CHOICES = [llm.PROVIDERS[PROVIDER]["strong"], llm.PROVIDERS[PROVIDER]["small"]]
     DEFAULT_A, DEFAULT_B = MODEL_CHOICES[0], MODEL_CHOICES[-1]
@@ -88,29 +92,69 @@ def use_demo():
 
 
 # ---- single-model run with live status streaming ----
+# ---- output saving: Google Drive folder if mounted, else local ----
+OUTPUT_DIR = None
+def _output_dir():
+    """Resolve the save folder once. Prefers Drive: /content/drive/MyDrive/Maths_Rag output.
+    Falls back to ./Maths_Rag_output if Drive isn't mounted."""
+    global OUTPUT_DIR
+    if OUTPUT_DIR:
+        return OUTPUT_DIR
+    drive = "/content/drive/MyDrive/Maths_Rag output"
+    if os.path.isdir("/content/drive/MyDrive"):
+        os.makedirs(drive, exist_ok=True)
+        OUTPUT_DIR = drive
+    else:
+        local = os.path.abspath("Maths_Rag_output")
+        os.makedirs(local, exist_ok=True)
+        OUTPUT_DIR = local
+    return OUTPUT_DIR
+
+
+def _save_run(record: dict):
+    """Append one run to a JSONL log and also write a readable per-run .md file."""
+    d = _output_dir()
+    # append to a single JSONL log (easy to load later for analysis)
+    with open(os.path.join(d, "runs.jsonl"), "a") as f:
+        f.write(json.dumps(record) + "\n")
+    # human-readable copy
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    safe_model = record["model"].replace(":", "-").replace("/", "-")
+    fname = f"{ts}_{safe_model}.md"
+    with open(os.path.join(d, fname), "w") as f:
+        f.write(f"# MathPaper AI run\n\n")
+        f.write(f"- **Time:** {record['time_iso']}\n")
+        f.write(f"- **Paper:** {record['paper']}\n")
+        f.write(f"- **Model:** `{record['model']}`\n")
+        f.write(f"- **Latency:** {record['latency_s']:.1f}s\n")
+        f.write(f"- **Agents fired:** {record['n_agents']}\n\n")
+        f.write(f"## Question\n{record['question']}\n\n")
+        f.write("## Agent trace\n" + "\n".join(f"- {t}" for t in record["trace"]) + "\n\n")
+        f.write(f"## Answer\n{record['answer']}\n")
+    return os.path.join(d, fname)
+
+
 def run_streaming(question, model_tag):
     if not question or not question.strip():
         yield "_Enter a question._", ""
         return
     planner = _planner_for(model_tag)
-    steps = []
 
-    # We can't easily stream from inside planner.run (it's synchronous), so we
-    # collect step labels via callback and show them once the run returns. For a
-    # true live feel we yield a "starting" frame first.
     yield "⏳ Running agents…", "### Agent status\n- starting…"
 
-    live = []
-    def on_step(label):
-        live.append(label)
-
     t0 = time.time()
-    state = planner.run(question.strip(), on_step=on_step)
+    state = planner.run(question.strip(), on_step=lambda l: None)
     dt = time.time() - t0
 
-    status = "### Agent status\n" + "\n".join(
-        f"- ✓ {s}" for s in state.trace
-    ) + f"\n\n**Model:** `{model_tag}` · **Time:** {dt:.1f}s"
+    saved = _save_run({
+        "time_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "paper": STATE["name"], "model": model_tag,
+        "question": question.strip(), "answer": state.answer or "",
+        "trace": state.trace, "n_agents": len(state.trace), "latency_s": dt,
+    })
+    status = ("### Agent status\n" + "\n".join(f"- ✓ {s}" for s in state.trace)
+              + f"\n\n**Model:** `{model_tag}` · **Time:** {dt:.1f}s"
+              + f"\n\n💾 Saved to `{saved}`")
     yield (state.answer or "_No answer produced._"), status
 
 
@@ -124,6 +168,12 @@ def run_compare(question, model_a, model_b):
         t0 = time.time()
         state = planner.run(question.strip())
         dt = time.time() - t0
+        _save_run({
+            "time_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "paper": STATE["name"], "model": tag,
+            "question": question.strip(), "answer": state.answer or "",
+            "trace": state.trace, "n_agents": len(state.trace), "latency_s": dt,
+        })
         trace = "\n".join(f"- {s}" for s in state.trace)
         meta = f"### `{tag}`\n{trace}\n\n**Time:** {dt:.1f}s · **Agents:** {len(state.trace)}"
         results.append((state.answer or "_No answer._", meta))
@@ -142,7 +192,8 @@ with gr.Blocks(title="MathPaper AI", theme=gr.themes.Soft()) as demo:
         "# MathPaper AI\n"
         "*Experimental approach to math intuition* — an agentic RAG system that "
         "explains concepts, derivations, and proofs from research papers by "
-        "coordinating specialized agents."
+        "coordinating specialized agents.\n\n"
+        "*Every run is saved to `Maths_Rag output` on your Drive (if mounted).*"
     )
 
     with gr.Accordion("📄 Paper: upload your own, or use the demo", open=False):
