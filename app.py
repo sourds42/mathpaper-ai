@@ -30,6 +30,7 @@ import gradio as gr
 
 from mathpaper import llm, PlanningAgent, HybridRetriever, load_demo_corpus
 from mathpaper.ingest import pdf_to_corpus, corpus_summary
+from mathpaper.evaluation import score_answer, composite
 
 # Longer timeout — local models cold-start slowly on the first call.
 def _post_long(url, headers, payload):
@@ -180,6 +181,74 @@ def run_compare(question, model_a, model_b):
     return results[0][0], results[0][1], results[1][0], results[1][1]
 
 
+# ---- evaluation: score selected models across a set of questions ----
+def run_evaluation(questions_text, selected_models, progress=gr.Progress()):
+    if not selected_models:
+        return "_Pick at least one model._", None
+    questions = [q.strip() for q in (questions_text or "").splitlines() if q.strip()]
+    if not questions:
+        return "_Enter at least one question (one per line)._", None
+
+    rows = []
+    total = len(selected_models) * len(questions)
+    done = 0
+    for model in selected_models:
+        for q in questions:
+            progress(done / total, desc=f"{model} · {q[:30]}…")
+            planner = _planner_for(model)
+            t0 = time.time()
+            state = planner.run(q)
+            dt = time.time() - t0
+            sc = score_answer(state.answer, state.evidence)
+            rows.append({
+                "model": model,
+                "question": q[:40] + ("…" if len(q) > 40 else ""),
+                "composite": composite(sc),
+                "cite_valid": sc["citation_validity"],
+                "grounded": sc["groundedness"],
+                "halluc": sc["hallucination_flag"],
+                "agents": len(state.trace),
+                "latency_s": round(dt, 1),
+            })
+            done += 1
+
+    # per-model averages
+    summary = {}
+    for r in rows:
+        m = r["model"]
+        s = summary.setdefault(m, {"composite": [], "grounded": [], "cite_valid": [],
+                                    "halluc": [], "latency_s": [], "agents": []})
+        for k in s:
+            s[k].append(r[k])
+    avg = lambda xs: round(sum(xs) / len(xs), 3)
+
+    # build a markdown leaderboard sorted by composite
+    board = sorted(summary.items(), key=lambda kv: -avg(kv[1]["composite"]))
+    md = "### Model leaderboard (averaged over questions)\n\n"
+    md += "| Model | Composite | Grounded | Cite-valid | Halluc. | Avg agents | Avg latency |\n"
+    md += "|---|---|---|---|---|---|---|\n"
+    for model, s in board:
+        md += (f"| `{model}` | **{avg(s['composite'])}** | {avg(s['grounded'])} | "
+               f"{avg(s['cite_valid'])} | {avg(s['halluc'])} | {avg(s['agents'])} | "
+               f"{avg(s['latency_s'])}s |\n")
+    md += ("\n*Composite blends citation validity, coverage, and groundedness "
+           "minus a hallucination penalty (reference-free, 0–1). Higher is better.*")
+
+    # save the full per-run detail to Drive
+    d = _output_dir()
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    with open(os.path.join(d, f"evaluation_{ts}.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    md += f"\n\n💾 Detailed results saved to `{os.path.join(d, f'evaluation_{ts}.jsonl')}`"
+
+    # dataframe wants list-of-lists in header order
+    cols = ["model", "question", "composite", "cite_valid",
+            "grounded", "halluc", "agents", "latency_s"]
+    table = [[r[c] for c in cols] for r in rows]
+    return md, table
+
+
 LATEX = [
     {"left": "$$", "right": "$$", "display": True},
     {"left": "\\[", "right": "\\]", "display": True},
@@ -235,6 +304,28 @@ with gr.Blocks(title="MathPaper AI", theme=gr.themes.Soft()) as demo:
                 traceB = gr.Markdown()
         ask2.click(run_compare, inputs=[q2, model_a, model_b],
                    outputs=[ansA, traceA, ansB, traceB])
+
+    with gr.Tab("📊 Evaluate models"):
+        gr.Markdown(
+            "Score multiple models on a set of questions using reference-free "
+            "metrics (faithfulness / groundedness / hallucination), then rank them. "
+            "Results save to your Drive folder."
+        )
+        with gr.Row():
+            eval_questions = gr.Textbox(
+                label="Questions (one per line)",
+                value="\n".join(SAMPLES), lines=5, scale=2)
+            eval_models = gr.CheckboxGroup(
+                MODEL_CHOICES, value=[DEFAULT_A, DEFAULT_B],
+                label="Models to evaluate", scale=1)
+        eval_btn = gr.Button("Run evaluation", variant="primary")
+        eval_board = gr.Markdown()
+        eval_table = gr.Dataframe(
+            headers=["model", "question", "composite", "cite_valid",
+                     "grounded", "halluc", "agents", "latency_s"],
+            label="Per-question detail", wrap=True)
+        eval_btn.click(run_evaluation, inputs=[eval_questions, eval_models],
+                       outputs=[eval_board, eval_table])
 
 if __name__ == "__main__":
     demo.queue().launch(share=True)
