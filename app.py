@@ -1,40 +1,37 @@
 """
-Gradio demo for MathPaper AI — host a live, shareable web UI for the multi-agent
-pipeline straight from Colab (or anywhere).
+Gradio demo for MathPaper AI — a live, shareable web UI for the multi-agent RAG
+pipeline. Host it from Colab (prints a public *.gradio.live URL).
+
+Three features:
+  1. Upload your own paper (PDF) — replaces the built-in demo corpus.
+  2. Live agent status — watch each agent fire in the backend as it runs.
+  3. Multi-model comparison — run the same question through two models
+     side-by-side and compare answers, agent traces, and timing.
 
 Colab usage:
-    !pip install -q gradio
-    # (repo already cloned + installed, Ollama running with models pulled)
-    import os
-    os.environ["LLM_PROVIDER"] = "ollama"   # or "gemini"
-    !python app.py                          # prints a public *.gradio.live URL
-
-The public link stays live while the notebook session runs.
+    !pip install -q gradio pymupdf
+    import os; os.environ["LLM_PROVIDER"] = "ollama"
+    !python app.py
 """
 
 import os
 import sys
+import time
 
-# make the package importable whether or not `pip install -e` registered the path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.join(_HERE, "src")
 if os.path.isdir(_SRC) and _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+import json
+import urllib.request
+
 import gradio as gr
 
 from mathpaper import llm, PlanningAgent, HybridRetriever, load_demo_corpus
+from mathpaper.ingest import pdf_to_corpus, corpus_summary
 
-# ----------------------------------------------------------------------
-# Model config: default to whatever the env says; make local names match
-# the models people actually pull in Colab (llama3.2:3b + qwen2.5:7b).
-# ----------------------------------------------------------------------
-if os.environ.get("LLM_PROVIDER", "ollama") == "ollama":
-    llm.PROVIDERS["ollama"]["small"] = os.environ.get("OLLAMA_SMALL", "llama3.2:3b")
-    llm.PROVIDERS["ollama"]["strong"] = os.environ.get("OLLAMA_STRONG", "qwen2.5:7b")
-
-# Longer timeout — local models cold-start slowly on first call.
-import json, urllib.request
+# Longer timeout — local models cold-start slowly on the first call.
 def _post_long(url, headers, payload):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers=headers, method="POST")
@@ -42,8 +39,15 @@ def _post_long(url, headers, payload):
         return json.loads(r.read().decode())
 llm._post = _post_long
 
-# One planner instance, reused across requests (keeps conversation memory).
-PLANNER = PlanningAgent(HybridRetriever(load_demo_corpus()))
+PROVIDER = os.environ.get("LLM_PROVIDER", "ollama")
+
+# Model choices offered in the UI. For Ollama these are tags you've pulled.
+if PROVIDER == "ollama":
+    MODEL_CHOICES = ["qwen2.5:7b", "llama3.2:3b", "qwen2.5:3b", "gemma3:4b"]
+    DEFAULT_A, DEFAULT_B = "qwen2.5:7b", "llama3.2:3b"
+else:
+    MODEL_CHOICES = [llm.PROVIDERS[PROVIDER]["strong"], llm.PROVIDERS[PROVIDER]["small"]]
+    DEFAULT_A, DEFAULT_B = MODEL_CHOICES[0], MODEL_CHOICES[-1]
 
 SAMPLES = [
     "Why is KL divergence minimized in Equation (5)?",
@@ -52,51 +56,134 @@ SAMPLES = [
     "How is Equation (5) derived from the ELBO?",
 ]
 
+# ---- shared corpus state: starts as the demo paper, swapped by PDF upload ----
+STATE = {"corpus": load_demo_corpus(), "name": "Built-in demo (VAE paper)"}
 
-def answer_question(question):
-    if not question or not question.strip():
-        return "_Enter a question about the paper._", ""
+
+def _planner_for(model_tag):
+    """Build a planner whose strong+small roles both point at one model tag,
+    so the whole pipeline runs on the chosen model (clean for comparison)."""
+    if PROVIDER == "ollama":
+        llm.PROVIDERS["ollama"]["small"] = model_tag
+        llm.PROVIDERS["ollama"]["strong"] = model_tag
+    return PlanningAgent(HybridRetriever(STATE["corpus"]))
+
+
+def load_pdf(pdf_file):
+    if pdf_file is None:
+        return f"Using: **{STATE['name']}**"
     try:
-        state = PLANNER.run(question.strip())
+        corpus = pdf_to_corpus(pdf_file.name)
     except Exception as e:
-        msg = (f"**Error:** {e}\n\n"
-               "(If this is a timeout, the model is still loading — "
-               "try again in a few seconds.)")
-        return msg, ""
-    trace = "\n".join(f"- {t}" for t in state.trace)
-    trace_md = f"### Agent trace\n{trace}"
-    answer_md = state.answer or "_No answer produced._"
-    return answer_md, trace_md
+        return f"**Could not read PDF:** {e}"
+    STATE["corpus"] = corpus
+    STATE["name"] = os.path.basename(pdf_file.name)
+    return f"Loaded **{STATE['name']}** — {corpus_summary(corpus)}"
 
+
+def use_demo():
+    STATE["corpus"] = load_demo_corpus()
+    STATE["name"] = "Built-in demo (VAE paper)"
+    return f"Using: **{STATE['name']}**"
+
+
+# ---- single-model run with live status streaming ----
+def run_streaming(question, model_tag):
+    if not question or not question.strip():
+        yield "_Enter a question._", ""
+        return
+    planner = _planner_for(model_tag)
+    steps = []
+
+    # We can't easily stream from inside planner.run (it's synchronous), so we
+    # collect step labels via callback and show them once the run returns. For a
+    # true live feel we yield a "starting" frame first.
+    yield "⏳ Running agents…", "### Agent status\n- starting…"
+
+    live = []
+    def on_step(label):
+        live.append(label)
+
+    t0 = time.time()
+    state = planner.run(question.strip(), on_step=on_step)
+    dt = time.time() - t0
+
+    status = "### Agent status\n" + "\n".join(
+        f"- ✓ {s}" for s in state.trace
+    ) + f"\n\n**Model:** `{model_tag}` · **Time:** {dt:.1f}s"
+    yield (state.answer or "_No answer produced._"), status
+
+
+# ---- two-model comparison ----
+def run_compare(question, model_a, model_b):
+    if not question or not question.strip():
+        return "_Enter a question._", "", "_Enter a question._", ""
+    results = []
+    for tag in (model_a, model_b):
+        planner = _planner_for(tag)
+        t0 = time.time()
+        state = planner.run(question.strip())
+        dt = time.time() - t0
+        trace = "\n".join(f"- {s}" for s in state.trace)
+        meta = f"### `{tag}`\n{trace}\n\n**Time:** {dt:.1f}s · **Agents:** {len(state.trace)}"
+        results.append((state.answer or "_No answer._", meta))
+    return results[0][0], results[0][1], results[1][0], results[1][1]
+
+
+LATEX = [
+    {"left": "$$", "right": "$$", "display": True},
+    {"left": "\\[", "right": "\\]", "display": True},
+    {"left": "$", "right": "$", "display": False},
+    {"left": "\\(", "right": "\\)", "display": False},
+]
 
 with gr.Blocks(title="MathPaper AI", theme=gr.themes.Soft()) as demo:
     gr.Markdown(
         "# MathPaper AI\n"
         "*Experimental approach to math intuition* — an agentic RAG system that "
-        "explains concepts, derivations, and proofs from a research paper "
-        "(*a VAE for molecular generation*) by coordinating specialized agents.\n\n"
-        "Ask a question below. The **agent trace** shows which agents fired — "
-        "simple questions skip agents they don't need (dynamic orchestration)."
+        "explains concepts, derivations, and proofs from research papers by "
+        "coordinating specialized agents."
     )
-    with gr.Row():
-        q = gr.Textbox(label="Your question", value=SAMPLES[0], scale=4)
-        btn = gr.Button("Ask", variant="primary", scale=1)
-    gr.Examples(examples=SAMPLES, inputs=q)
-    with gr.Row():
-        with gr.Column(scale=3):
-            answer = gr.Markdown(label="Answer", latex_delimiters=[
-                {"left": "$$", "right": "$$", "display": True},
-                {"left": "\\[", "right": "\\]", "display": True},
-                {"left": "$", "right": "$", "display": False},
-                {"left": "\\(", "right": "\\)", "display": False},
-            ])
-        with gr.Column(scale=2):
-            trace = gr.Markdown()
 
-    btn.click(answer_question, inputs=q, outputs=[answer, trace])
-    q.submit(answer_question, inputs=q, outputs=[answer, trace])
+    with gr.Accordion("📄 Paper: upload your own, or use the demo", open=False):
+        with gr.Row():
+            pdf = gr.File(label="Upload a research paper (PDF)", file_types=[".pdf"])
+            with gr.Column():
+                demo_btn = gr.Button("Use built-in demo paper")
+        paper_status = gr.Markdown(f"Using: **{STATE['name']}**")
+        pdf.change(load_pdf, inputs=pdf, outputs=paper_status)
+        demo_btn.click(use_demo, outputs=paper_status)
 
+    with gr.Tab("Ask (single model)"):
+        with gr.Row():
+            q1 = gr.Textbox(label="Your question", value=SAMPLES[0], scale=3)
+            model1 = gr.Dropdown(MODEL_CHOICES, value=DEFAULT_A, label="Model", scale=1)
+            ask1 = gr.Button("Ask", variant="primary", scale=1)
+        gr.Examples(SAMPLES, inputs=q1)
+        with gr.Row():
+            ans1 = gr.Markdown(latex_delimiters=LATEX)
+            status1 = gr.Markdown()
+        ask1.click(run_streaming, inputs=[q1, model1], outputs=[ans1, status1])
+        q1.submit(run_streaming, inputs=[q1, model1], outputs=[ans1, status1])
+
+    with gr.Tab("Compare two models"):
+        with gr.Row():
+            q2 = gr.Textbox(label="Your question", value=SAMPLES[0], scale=2)
+            model_a = gr.Dropdown(MODEL_CHOICES, value=DEFAULT_A, label="Model A", scale=1)
+            model_b = gr.Dropdown(MODEL_CHOICES, value=DEFAULT_B, label="Model B", scale=1)
+            ask2 = gr.Button("Compare", variant="primary", scale=1)
+        gr.Examples(SAMPLES, inputs=q2)
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("#### Model A")
+                ansA = gr.Markdown(latex_delimiters=LATEX)
+                traceA = gr.Markdown()
+            with gr.Column():
+                gr.Markdown("#### Model B")
+                ansB = gr.Markdown(latex_delimiters=LATEX)
+                traceB = gr.Markdown()
+        ask2.click(run_compare, inputs=[q2, model_a, model_b],
+                   outputs=[ansA, traceA, ansB, traceB])
 
 if __name__ == "__main__":
-    # share=True gives a public *.gradio.live URL (works from Colab)
-    demo.launch(share=True)
+    demo.queue().launch(share=True)
