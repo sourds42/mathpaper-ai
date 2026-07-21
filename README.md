@@ -1,6 +1,8 @@
 # MathPaper AI
 
-**An agentic RAG system that explains mathematical concepts, derivations, and proofs from research papers.**
+> **Experimental approach to math intuition** — an agentic RAG system that explains
+> concepts, derivations, and proofs from research papers by retrieving the
+> prerequisite knowledge papers assume but never define.
 
 Instead of one LLM doing everything, MathPaper AI decomposes each question into a
 team of specialized agents — a planner coordinates retrieval, prerequisite-filling,
