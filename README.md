@@ -8,10 +8,10 @@ memory, evidence verification, explanation, and citation checking. This modular
 design improves accuracy, reduces hallucination, and cuts latency by invoking only
 the agents a given query actually needs.
 
-![CI](https://github.com/YOUR_USERNAME/mathpaper-ai/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/sourds42/maths-paper-rag/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_USERNAME/mathpaper-ai/blob/main/MathPaper_AI_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sourds42/maths-paper-rag/blob/main/MathPaper_AI_Colab.ipynb)
 
 ---
 

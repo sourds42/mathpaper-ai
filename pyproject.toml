@@ -9,7 +9,7 @@ description = "An agentic RAG system that explains mathematical concepts, deriva
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Your Name" }]
+authors = [{ name = "Souradeep Das" }]
 keywords = ["rag", "agents", "llm", "retrieval", "nlp"]
 dependencies = [
     "rank_bm25>=0.2.2",
@@ -21,7 +21,7 @@ dependencies = [
 dev = ["pytest>=7.0"]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/mathpaper-ai"
+Homepage = "https://github.com/sourds42/maths-paper-rag"
 
 [tool.setuptools.packages.find]
 where = ["src"]
