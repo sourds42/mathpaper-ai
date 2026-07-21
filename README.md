@@ -17,6 +17,31 @@ the agents a given query actually needs.
 
 ---
 
+## Demo
+
+A live, interactive web demo (Gradio) runs the full multi-agent pipeline on local
+open models — no API key required. Launch it from the [Colab notebook](MathPaper_AI_Colab.ipynb)
+and it prints a public link.
+
+**Ask a question — one model, with a live agent trace and LaTeX-rendered math:**
+
+![Ask tab](screenshots/ask.png)
+
+**Compare two models side-by-side** on the same question, each with its own agent
+trace, timing, and agent count:
+
+![Compare two models](screenshots/compare.png)
+
+**Evaluate and rank models** across a question set using reference-free
+faithfulness / groundedness / hallucination metrics:
+
+![Evaluate models](screenshots/evaluate.png)
+
+Every run is saved to a `Maths_Rag output` folder on Google Drive (when mounted)
+for later analysis.
+
+---
+
 ## Why multi-agent?
 
 A plain RAG pipeline fails on math papers for four reasons: equations get split
@@ -74,7 +99,8 @@ your own machine is low on RAM/VRAM.
 `app.py` is a Gradio web UI for the pipeline with three features:
 **(1)** upload your own paper (PDF) instead of the built-in demo,
 **(2)** live agent status — watch each agent fire in the backend,
-**(3)** compare two models side-by-side on the same question.
+**(3)** compare two models side-by-side, and
+**(4)** an **Evaluate** tab that scores multiple models across a question set on reference-free faithfulness/groundedness metrics and ranks them.
 
 In your Colab notebook, after the setup + Ollama cells:
 
@@ -129,19 +155,36 @@ Dynamic orchestration cuts the most common query type (variable lookup) from 7
 agent invocations to 3 — about 57% fewer LLM calls — while keeping the full
 pipeline for derivations.
 
+### Model comparison (local, via the Evaluate tab)
+
+Running the same pipeline across local models on a Colab T4 surfaced a real
+three-way tradeoff between reliability, reasoning, and speed:
+
+| Model | Notes |
+|---|---|
+| `qwen2.5:7b` | Clean structured output, reliable JSON; slower on long derivations |
+| `deepseek-r1:7b` | Reasoning model — emits `<think>` blocks that need stripping before JSON parsing; step-by-step answers |
+| `llama3.2:3b` | Fastest (seconds on simple lookups) but occasionally emits invalid JSON, needing fail-safe handling |
+
+This motivated `safe_json` in `agents.py`, which tolerates reasoning tags, code
+fences, and malformed output so a single bad response never crashes a run.
+
 ---
 
 ## Project layout
 
 ```
 src/mathpaper/
-  agents.py       8 agents + the Planner (dynamic orchestration, verify loop)
-  retrieval.py    hybrid dense + BM25 retrieval (RRF), toy corpus
+  agents.py       8 agents + Planner (dynamic orchestration, verify loop, safe_json)
+  retrieval.py    hybrid dense + BM25 retrieval (RRF), demo corpus
   llm.py          provider-agnostic LLM adapter (stdlib only)
-tests/
-  test_agents.py  orchestration tests with a mocked LLM (no key needed)
+  ingest.py       PDF -> equation-anchored corpus (upload your own paper)
+  evaluation.py   reference-free answer scoring (faithfulness / groundedness)
+tests/            orchestration, ingestion, and scoring tests (no key needed)
+app.py            Gradio web demo: ask, compare, evaluate
 evaluate.py       retrieval + orchestration benchmark
-demo/demo.jsx     interactive React demo with LaTeX rendering
+demo/demo.jsx     standalone React demo with LaTeX rendering
+MathPaper_AI_Colab.ipynb   one-click Colab runner
 results/          benchmark output (json + charts)
 ```
 

@@ -68,6 +68,8 @@ def evaluate(retriever, eval_set, k=3, id_map=lambda i: i):
 
 
 def main():
+    import os
+    os.makedirs("results", exist_ok=True)
     corpus = load_demo_corpus()
     strip = lambda cid: cid.removesuffix("_b")   # map split chunks back to source
 

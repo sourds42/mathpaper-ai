@@ -85,3 +85,31 @@ def test_answer_is_produced(planner):
     s = planner.run("Why use cross entropy instead of mean squared error?")
     assert s.answer
     assert "[chunk_" in s.answer
+
+
+# ---- safe_json robustness (small/reasoning models emit imperfect JSON) ----
+from mathpaper.agents import safe_json
+
+_DEF = {"sufficient": True, "missing_concepts": []}
+
+
+def test_safe_json_clean():
+    assert safe_json('{"sufficient": false, "missing_concepts": ["KL"]}', _DEF)["sufficient"] is False
+
+
+def test_safe_json_strips_think_tags():
+    raw = '<think>reasoning...</think>\n{"sufficient": true, "missing_concepts": []}'
+    assert safe_json(raw, _DEF)["sufficient"] is True
+
+
+def test_safe_json_strips_code_fences():
+    raw = '```json\n{"sufficient": false, "missing_concepts": ["x"]}\n```'
+    assert safe_json(raw, _DEF)["missing_concepts"] == ["x"]
+
+
+def test_safe_json_falls_back_on_broken():
+    assert safe_json('{"sufficient": true "missing" ]', _DEF) == _DEF
+
+
+def test_safe_json_handles_none():
+    assert safe_json(None, _DEF) == _DEF
