@@ -8,6 +8,7 @@ LLM calls are routed through `call_llm()` — plug in any provider there.
 from dataclasses import dataclass, field
 from enum import Enum
 import json
+import re
 
 from .retrieval import HybridRetriever
 
@@ -17,6 +18,35 @@ from .retrieval import HybridRetriever
 # Works with Groq, Gemini, OpenRouter, GitHub Models, Ollama, or Anthropic.
 # ----------------------------------------------------------------------
 from .llm import call_llm  # noqa: E402
+
+
+# ----------------------------------------------------------------------
+# Robust JSON parsing for model output.
+# Smaller / reasoning models don't always obey "reply only JSON": DeepSeek-R1
+# wraps output in <think>...</think>, some models add prose or ```json fences,
+# and tiny models occasionally emit syntactically invalid JSON. safe_json
+# repairs what it can and falls back to a caller-supplied default so one bad
+# response never crashes the pipeline.
+# ----------------------------------------------------------------------
+def safe_json(raw: str, default: dict) -> dict:
+    if raw is None:
+        return dict(default)
+    # try as-is first
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    # strip reasoning tags + code fences, then extract the first {...} object
+    cleaned = re.sub(r"<think>.*?</think>", "", str(raw), flags=re.DOTALL)
+    cleaned = cleaned.replace("```json", "").replace("```", "")
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            pass
+    # give up gracefully — return the safe default so the pipeline continues
+    return dict(default)
 
 
 # ----------------------------------------------------------------------
@@ -61,9 +91,13 @@ class QueryAnalyzerAgent:
 
     def run(self, state: AgentState) -> AgentState:
         raw = call_llm(self.SYSTEM, state.question, model="small")
-        data = json.loads(raw)
-        state.intent = Intent(data["intent"])
-        state.expertise = data["expertise"]
+        data = safe_json(raw, {"intent": "equation_explanation",
+                               "expertise": "undergraduate"})
+        try:
+            state.intent = Intent(data.get("intent", "equation_explanation"))
+        except ValueError:
+            state.intent = Intent.EQUATION_EXPLANATION
+        state.expertise = data.get("expertise", "undergraduate")
         state.log("QueryAnalyzer", state.intent.value)
         return state
 
@@ -136,8 +170,9 @@ class EvidenceVerificationAgent:
             f"Paper evidence: {json.dumps([e['text'] for e in state.evidence])}\n\n"
             f"External knowledge: {json.dumps([k['text'] for k in state.external_knowledge])}"
         )
-        data = json.loads(call_llm(self.SYSTEM, prompt, model="strong"))
-        state.verified = data["sufficient"]
+        data = safe_json(call_llm(self.SYSTEM, prompt, model="strong"),
+                         {"sufficient": True, "missing_concepts": []})
+        state.verified = data.get("sufficient", True)
         state.missing = data.get("missing_concepts", [])
         state.log("EvidenceVerifier", "sufficient" if state.verified else f"missing: {state.missing}")
         return state
@@ -168,11 +203,13 @@ class CitationValidationAgent:
 
     def run(self, state: AgentState) -> AgentState:
         prompt = f"Answer: {state.answer}\n\nEvidence: {json.dumps(state.evidence)}"
-        data = json.loads(call_llm(self.SYSTEM, prompt, model="strong"))
-        state.log("CitationValidator", "valid" if data["valid"] else "rejected")
-        if not data["valid"]:
+        data = safe_json(call_llm(self.SYSTEM, prompt, model="strong"),
+                         {"valid": True, "unsupported": []})
+        valid = data.get("valid", True)
+        state.log("CitationValidator", "valid" if valid else "rejected")
+        if not valid:
             state.verified = False           # forces another retrieval cycle
-            state.missing = data["unsupported"]
+            state.missing = data.get("unsupported", [])
         return state
 
 
