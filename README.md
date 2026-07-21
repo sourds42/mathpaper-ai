@@ -71,18 +71,25 @@ your own machine is low on RAM/VRAM.
 
 ### Host a live web demo (Gradio, from Colab)
 
-`app.py` is a Gradio web UI for the pipeline. In your Colab notebook, after the
-setup + Ollama cells:
+`app.py` is a Gradio web UI for the pipeline with three features:
+**(1)** upload your own paper (PDF) instead of the built-in demo,
+**(2)** live agent status — watch each agent fire in the backend,
+**(3)** compare two models side-by-side on the same question.
+
+In your Colab notebook, after the setup + Ollama cells:
 
 ```python
-!pip install -q gradio
+!pip install -q gradio pymupdf
 import os
 os.environ["LLM_PROVIDER"] = "ollama"
 !python app.py          # prints a public *.gradio.live link, live while the session runs
 ```
 
-Share the printed URL for a working, interactive demo — question in, agent trace
-and answer out, with LaTeX rendering.
+Share the printed URL for a working, interactive demo. LaTeX renders in answers.
+
+> PDF note: extraction is lightweight (PyMuPDF) — great for text and inline math,
+> but complex typeset equations may not survive perfectly. Scanned/image PDFs need
+> OCR and aren't supported.
 
 ### End-to-end with a free LLM provider
 

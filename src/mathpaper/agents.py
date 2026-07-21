@@ -203,29 +203,46 @@ class PlanningAgent:
             "cite": CitationValidationAgent(),
         }
 
-    def run(self, question: str) -> AgentState:
+    def run(self, question: str, on_step=None) -> AgentState:
+        """on_step(label) is called before each agent runs, for live progress UIs.
+        It's optional — existing callers pass nothing and behavior is unchanged."""
+        def notify(label):
+            if on_step:
+                on_step(label)
+
         state = AgentState(question=question)
+        notify("Query Analyzer")
         state = self.agents["analyze"].run(state)
         plan = self.PIPELINES[state.intent]
+        notify("Planner")
         state.log("Planner", f"plan={plan}")
 
         if "memory" not in plan:
             state.resolved_question = question
 
+        labels = {
+            "memory": "Memory", "retrieve": "Paper Retrieval",
+            "verify": "Evidence Verifier", "generate": "Explanation Generator",
+            "cite": "Citation Validator",
+        }
         for step in plan:
             if step == "verify":
                 # verification loop: retrieve more / fill math gaps until sufficient
                 for _ in range(self.MAX_RETRIEVAL_CYCLES):
+                    notify("Evidence Verifier")
                     state = self.agents["verify"].run(state)
                     if state.verified:
                         break
                     if state.missing:
+                        notify("Math Knowledge")
                         state = self.agents["math"].run(state)
                     else:
+                        notify("Paper Retrieval")
                         state = self.agents["retrieve"].run(
                             state, extra_query=state.resolved_question
                         )
             else:
+                notify(labels.get(step, step))
                 state = self.agents[step].run(state)
 
         self.memory.commit(state)
