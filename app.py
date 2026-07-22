@@ -1,17 +1,13 @@
 """
-Gradio demo for MathPaper AI — a live, shareable web UI for the multi-agent RAG
-pipeline. Host it from Colab (prints a public *.gradio.live URL).
-
-Tabs:
-  1. Ask (single model)  — answer + agent trace + tool sources + paper evidence
-  2. Compare two models  — same question through two LLMs, side by side
-  3. Evaluate models     — score several LLMs on a question set, ranked leaderboard
+Gradio demo for MathPaper AI — live multi-agent RAG over a research paper.
 
 Answers are grounded in BOTH the paper (retrieved chunks) and external references
-(Wikipedia / Encyclopedia of Mathematics / ProofWiki / MathWorld) and rendered in
-LaTeX.
+(Wikipedia / Encyclopedia of Mathematics / ProofWiki / MathWorld), rendered in LaTeX.
 
-Colab usage:
+The agent pipeline runs in a background thread while the UI polls it, so you can
+watch each agent fire live instead of staring at a blank panel.
+
+Colab:
     !pip install -q gradio pymupdf
     import os; os.environ["LLM_PROVIDER"] = "ollama"
     !python app.py
@@ -19,7 +15,9 @@ Colab usage:
 
 import json
 import os
+import re
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -36,7 +34,6 @@ from mathpaper.ingest import pdf_to_corpus, corpus_summary
 from mathpaper.evaluation import score_answer, composite
 
 
-# ---- local models cold-start slowly: raise the HTTP timeout -----------
 def _post_long(url, headers, payload):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers=headers, method="POST")
@@ -46,7 +43,6 @@ llm._post = _post_long
 
 PROVIDER = os.environ.get("LLM_PROVIDER", "ollama")
 
-# Language models offered in the UI. For Ollama these are tags you have pulled.
 if PROVIDER == "ollama":
     MODEL_CHOICES = [
         "qwen2.5:7b", "llama3.2:3b", "qwen2.5:3b", "qwen2.5:14b",
@@ -72,10 +68,14 @@ LATEX = [
     {"left": "\\(", "right": "\\)", "display": False},
 ]
 
+ALL_AGENTS = ["Query Analyzer", "Planner", "Memory", "Paper Retrieval",
+              "Evidence Verifier", "Math Knowledge", "Explanation Generator",
+              "Citation Validator"]
+
 STATE = {"corpus": load_demo_corpus(), "name": "Built-in demo (VAE paper)"}
 
 
-# ---- output saving: Drive folder if mounted, else local ----------------
+# ---------------- output saving ----------------
 OUTPUT_DIR = None
 def _output_dir():
     global OUTPUT_DIR
@@ -83,36 +83,31 @@ def _output_dir():
         return OUTPUT_DIR
     drive = "/content/drive/MyDrive/Maths_Rag output"
     if os.path.isdir("/content/drive/MyDrive"):
-        os.makedirs(drive, exist_ok=True)
-        OUTPUT_DIR = drive
+        os.makedirs(drive, exist_ok=True); OUTPUT_DIR = drive
     else:
-        OUTPUT_DIR = os.path.abspath("Maths_Rag_output")
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        OUTPUT_DIR = os.path.abspath("Maths_Rag_output"); os.makedirs(OUTPUT_DIR, exist_ok=True)
     return OUTPUT_DIR
 
 
-def _save_run(record):
-    d = _output_dir()
-    with open(os.path.join(d, "runs.jsonl"), "a") as f:
-        f.write(json.dumps(record) + "\n")
-    return d
+def _save_run(rec):
+    with open(os.path.join(_output_dir(), "runs.jsonl"), "a") as f:
+        f.write(json.dumps(rec) + "\n")
 
 
 def _planner_for(model_tag):
-    """Point both agent roles at one model so comparisons are clean."""
     if PROVIDER == "ollama":
         llm.PROVIDERS["ollama"]["small"] = model_tag
         llm.PROVIDERS["ollama"]["strong"] = model_tag
     return PlanningAgent(HybridRetriever(STATE["corpus"]))
 
 
-# ---- paper handling ----------------------------------------------------
-def load_pdf(pdf_file):
-    if pdf_file is None:
+# ---------------- paper handling ----------------
+def load_pdf(f):
+    if f is None:
         return f"Using: **{STATE['name']}**"
     try:
-        STATE["corpus"] = pdf_to_corpus(pdf_file.name)
-        STATE["name"] = os.path.basename(pdf_file.name)
+        STATE["corpus"] = pdf_to_corpus(f.name)
+        STATE["name"] = os.path.basename(f.name)
         return f"Loaded **{STATE['name']}** — {corpus_summary(STATE['corpus'])}"
     except Exception as e:
         return f"**Could not read PDF:** {e}"
@@ -124,25 +119,32 @@ def use_demo():
     return f"Using: **{STATE['name']}**"
 
 
-# ---- shared rendering helpers -----------------------------------------
-def _trace_md(state, model_tag, dt):
-    return ("### Agent trace\n" + "\n".join(f"- {t}" for t in state.trace)
-            + f"\n\n**Model:** `{model_tag}` · **Time:** {dt:.1f}s"
-            + f"\n\n**Paper:** {STATE['name']}")
+# ---------------- rendering ----------------
+def _status_md(done, current, elapsed, model, note=""):
+    """Live backend view: which agents have run, which is running now."""
+    lines = []
+    for a in ALL_AGENTS:
+        if a in done:
+            lines.append(f'<div class="ag ok">✓ {a}</div>')
+        elif a == current:
+            lines.append(f'<div class="ag run">▶ {a} <span class="dots">…</span></div>')
+        else:
+            lines.append(f'<div class="ag idle">· {a}</div>')
+    head = (f'<div class="stat-head">backend · <b>{model}</b> · {elapsed:.0f}s</div>')
+    return f'<div class="statbox">{head}{"".join(lines)}'\
+           f'<div class="stat-note">{note}</div></div>'
 
 
 def _tools_md(state):
     md = "### Tool-sourced background\n"
     if not state.external_knowledge:
-        return md + ("\n_No external lookup needed — the verifier judged the paper "
-                     "evidence sufficient. Tick **force tool lookup** to see the "
-                     "reference tool fire anyway._")
+        return md + "\n_No external lookup was needed for this question._"
     for k in state.external_knowledge:
         md += f"\n**{k.get('concept','')}** — *{k.get('source_name','external')}*  \n"
         md += f"{k.get('text','')[:320]}\n"
-        url = k.get("source", "")
-        if str(url).startswith("http"):
-            md += f"\n[{url}]({url})\n"
+        u = k.get("source", "")
+        if str(u).startswith("http"):
+            md += f"\n[{u}]({u})\n"
     return md
 
 
@@ -156,103 +158,152 @@ def _evidence_md(state):
 
 
 def _force_tool(state, question):
-    """Run the reference tool even if the verifier didn't ask for it, then
-    regenerate so the answer actually uses the fetched definition."""
-    import re
     from mathpaper.agents import MathKnowledgeAgent, ExplanationGeneratorAgent
-    concept = re.sub(r"(?i)^(why|how|what)\s+(is|are|does|do|use)\s+", "", question)
-    concept = re.sub(r"(?i)\s*(in|from)\s+equation.*$", "", concept).strip(" ?.")
-    if not concept:
+    c = re.sub(r"(?i)^(why|how|what)\s+(is|are|does|do|use)\s+", "", question)
+    c = re.sub(r"(?i)\s*(in|from)\s+equation.*$", "", c).strip(" ?.")
+    if not c:
         return state
-    state.missing = [concept]
+    state.missing = [c]
     MathKnowledgeAgent().run(state)
     ExplanationGeneratorAgent().run(state)
     return state
 
 
-# ---- tab 1: ask --------------------------------------------------------
+# ---------------- tab 1: ask (streaming) ----------------
 def run_ask(question, model_tag, force_tool):
     q = (question or "").strip()
     if not q:
-        return "_Enter a question._", "", "", ""
-    try:
-        planner = _planner_for(model_tag)
-        t0 = time.time()
-        state = planner.run(q)
-        if force_tool and not state.external_knowledge:
-            state = _force_tool(state, q)
-        dt = time.time() - t0
-        _save_run({"time_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
-                   "paper": STATE["name"], "model": model_tag, "question": q,
-                   "answer": state.answer or "", "trace": state.trace,
-                   "n_agents": len(state.trace), "latency_s": round(dt, 1)})
-        return (state.answer or "_No answer produced._",
-                _trace_md(state, model_tag, dt), _tools_md(state), _evidence_md(state))
-    except Exception as e:
-        # surface errors in the UI instead of failing silently
-        return (f"### Error\n```\n{e}\n```\n<details><summary>traceback</summary>\n\n"
-                f"```\n{traceback.format_exc()[-1500:]}\n```\n</details>",
-                "", "", "")
+        yield "_Enter a question._", "", "", ""
+        return
+
+    shared = {"done": [], "current": None, "state": None, "error": None, "note": ""}
+
+    def on_step(label):
+        if shared["current"]:
+            shared["done"].append(shared["current"])
+        shared["current"] = label
+
+    def worker():
+        try:
+            planner = _planner_for(model_tag)
+            st = planner.run(q, on_step=on_step)
+            if force_tool and not st.external_knowledge:
+                shared["current"] = "Math Knowledge"
+                shared["note"] = "forcing external reference lookup…"
+                st = _force_tool(st, q)
+                shared["note"] = ""
+            if shared["current"]:
+                shared["done"].append(shared["current"])
+            shared["current"] = None
+            shared["state"] = st
+        except Exception as e:
+            shared["error"] = (e, traceback.format_exc())
+
+    t0 = time.time()
+    th = threading.Thread(target=worker, daemon=True)
+    th.start()
+
+    # poll while the pipeline runs so the UI shows live progress
+    while th.is_alive():
+        yield ("⏳ *working…*",
+               _status_md(shared["done"], shared["current"], time.time() - t0,
+                          model_tag, shared["note"]),
+               "", "")
+        time.sleep(0.4)
+    th.join()
+    dt = time.time() - t0
+
+    if shared["error"]:
+        e, tb = shared["error"]
+        yield (f"### Error\n```\n{e}\n```\n<details><summary>traceback</summary>\n\n"
+               f"```\n{tb[-1500:]}\n```\n</details>",
+               _status_md(shared["done"], None, dt, model_tag, "failed"), "", "")
+        return
+
+    st = shared["state"]
+    if not (st.answer or "").strip():
+        yield ("### No answer produced\nThe generator returned empty text. "
+               "This usually means the model is still warming up — try again, or "
+               "check the model is pulled (`!ollama list`).",
+               _status_md(shared["done"], None, dt, model_tag, "empty answer"),
+               _tools_md(st), _evidence_md(st))
+        return
+
+    _save_run({"time_iso": time.strftime("%Y-%m-%d %H:%M:%S"), "paper": STATE["name"],
+               "model": model_tag, "question": q, "answer": st.answer,
+               "trace": st.trace, "n_agents": len(st.trace), "latency_s": round(dt, 1)})
+
+    detail = "<br>".join(f"· {x}" for x in st.trace)
+    yield (st.answer,
+           _status_md(shared["done"], None, dt, model_tag, "done") +
+           f'<div class="tracebox"><b>trace</b><br>{detail}<br><br>'
+           f'<b>paper</b>: {STATE["name"]}</div>',
+           _tools_md(st), _evidence_md(st))
 
 
-# ---- tab 2: compare ----------------------------------------------------
+# ---------------- tab 2: compare ----------------
 def run_compare(question, model_a, model_b, force_tool):
     q = (question or "").strip()
     if not q:
-        return "_Enter a question._", "", "_Enter a question._", ""
-    out = []
-    for tag in (model_a, model_b):
+        yield "_Enter a question._", "", "_Enter a question._", ""
+        return
+    outs = {}
+    for slot, tag in (("A", model_a), ("B", model_b)):
+        yield (outs.get("A", "⏳ *waiting…*"), outs.get("At", ""),
+               outs.get("B", "⏳ *waiting…*"), outs.get("Bt", ""))
+        t0 = time.time()
         try:
             planner = _planner_for(tag)
-            t0 = time.time()
-            state = planner.run(q)
-            if force_tool and not state.external_knowledge:
-                state = _force_tool(state, q)
+            st = planner.run(q)
+            if force_tool and not st.external_knowledge:
+                st = _force_tool(st, q)
             dt = time.time() - t0
             _save_run({"time_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
                        "paper": STATE["name"], "model": tag, "question": q,
-                       "answer": state.answer or "", "trace": state.trace,
-                       "n_agents": len(state.trace), "latency_s": round(dt, 1)})
-            meta = _trace_md(state, tag, dt) + "\n\n" + _tools_md(state)
-            out.append((state.answer or "_No answer._", meta))
+                       "answer": st.answer or "", "trace": st.trace,
+                       "n_agents": len(st.trace), "latency_s": round(dt, 1)})
+            outs[slot] = st.answer or "_No answer._"
+            outs[slot + "t"] = (f'<div class="tracebox"><b>{tag}</b> · {dt:.1f}s · '
+                                f'{len(st.trace)} agents<br>'
+                                + "<br>".join(f"· {x}" for x in st.trace)
+                                + "</div>") + "\n\n" + _tools_md(st)
         except Exception as e:
-            out.append((f"### Error\n```\n{e}\n```", ""))
-    return out[0][0], out[0][1], out[1][0], out[1][1]
+            outs[slot] = f"### Error\n```\n{e}\n```"
+            outs[slot + "t"] = ""
+    yield outs.get("A", ""), outs.get("At", ""), outs.get("B", ""), outs.get("Bt", "")
 
 
-# ---- tab 3: evaluate ---------------------------------------------------
+# ---------------- tab 3: evaluate ----------------
 def run_evaluation(questions_text, selected_models, progress=gr.Progress()):
     if not selected_models:
         return "_Pick at least one model._", None
-    questions = [q.strip() for q in (questions_text or "").splitlines() if q.strip()]
+    questions = [x.strip() for x in (questions_text or "").splitlines() if x.strip()]
     if not questions:
         return "_Enter at least one question (one per line)._", None
 
     rows, errors = [], []
-    total = len(selected_models) * len(questions)
-    done = 0
+    total, done = len(selected_models) * len(questions), 0
     for model in selected_models:
         for q in questions:
             progress(done / total, desc=f"{model} · {q[:30]}…")
             try:
                 planner = _planner_for(model)
                 t0 = time.time()
-                state = planner.run(q)
+                st = planner.run(q)
                 dt = time.time() - t0
-                sc = score_answer(state.answer, state.evidence)
+                sc = score_answer(st.answer, st.evidence)
                 rows.append({"model": model, "question": q[:40],
                              "composite": composite(sc),
                              "cite_valid": sc["citation_validity"],
                              "grounded": sc["groundedness"],
                              "halluc": sc["hallucination_flag"],
-                             "agents": len(state.trace),
-                             "latency_s": round(dt, 1)})
+                             "agents": len(st.trace), "latency_s": round(dt, 1)})
             except Exception as e:
                 errors.append(f"{model} / {q[:30]}: {e}")
             done += 1
 
     if not rows:
-        return ("### Evaluation failed\n" + "\n".join(f"- {e}" for e in errors)), None
+        return "### Evaluation failed\n" + "\n".join(f"- {e}" for e in errors), None
 
     summary = {}
     for r in rows:
@@ -262,42 +313,70 @@ def run_evaluation(questions_text, selected_models, progress=gr.Progress()):
             s[k].append(r[k])
     avg = lambda xs: round(sum(xs) / len(xs), 3)
 
-    board = sorted(summary.items(), key=lambda kv: -avg(kv[1]["composite"]))
     md = "### Model leaderboard (averaged over questions)\n\n"
-    md += "| Model | Composite | Grounded | Cite-valid | Halluc. | Avg agents | Avg latency |\n"
-    md += "|---|---|---|---|---|---|---|\n"
-    for model, s in board:
+    md += "| Model | Composite | Grounded | Cite-valid | Halluc. | Avg agents | Avg latency |\n|---|---|---|---|---|---|---|\n"
+    for model, s in sorted(summary.items(), key=lambda kv: -avg(kv[1]["composite"])):
         md += (f"| `{model}` | **{avg(s['composite'])}** | {avg(s['grounded'])} | "
                f"{avg(s['cite_valid'])} | {avg(s['halluc'])} | {avg(s['agents'])} | "
                f"{avg(s['latency_s'])}s |\n")
-    md += ("\n*Composite blends citation validity, coverage, and groundedness minus a "
+    md += ("\n*Composite blends citation validity, coverage and groundedness minus a "
            "hallucination penalty (reference-free, 0–1). Higher is better.*")
     if errors:
         md += "\n\n**Errors:**\n" + "\n".join(f"- {e}" for e in errors[:5])
 
-    d = _output_dir()
     ts = time.strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(d, f"evaluation_{ts}.jsonl")
+    path = os.path.join(_output_dir(), f"evaluation_{ts}.jsonl")
     with open(path, "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
-    md += f"\n\n💾 Detailed results saved to `{path}`"
+    md += f"\n\n💾 Saved to `{path}`"
 
     cols = ["model", "question", "composite", "cite_valid", "grounded",
             "halluc", "agents", "latency_s"]
     return md, [[r[c] for c in cols] for r in rows]
 
 
-# ---- UI ----------------------------------------------------------------
+# ---------------- theme (matches the original demo palette) ----------------
+CSS = """
+@import url('https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap');
+.gradio-container, .gradio-container * { font-family: 'STIX Two Text', Georgia, serif !important; }
+.gradio-container { background: #16211b !important; color: #ece7da !important; max-width: 1180px !important; }
+.gradio-container h1 { font-size: 2.4rem !important; font-weight: 600 !important; color: #ece7da !important; }
+.gradio-container h2, .gradio-container h3, .gradio-container h4 { color: #ece7da !important; }
+.gradio-container p, .gradio-container li, .gradio-container span, .gradio-container label { color: #ece7da !important; }
+.gradio-container em { color: #a9b3a8 !important; }
+.block, .form, .gr-box, .gr-panel { background: #19251f !important; border-color: #3a4a40 !important; border-radius: 2px !important; }
+input, textarea, .gr-input, .gr-text-input { background: #1e2b24 !important; color: #ece7da !important; border-color: #3a4a40 !important; border-radius: 2px !important; }
+button.primary, .gr-button-primary { background: #e6c76d !important; color: #16211b !important; border: none !important; border-radius: 2px !important; font-family: 'IBM Plex Mono', monospace !important; font-weight: 500 !important; }
+button.secondary, .gr-button { background: transparent !important; color: #a9b3a8 !important; border: 1px solid #3a4a40 !important; border-radius: 2px !important; font-family: 'IBM Plex Mono', monospace !important; }
+.tab-nav button { color: #a9b3a8 !important; font-family: 'IBM Plex Mono', monospace !important; }
+.tab-nav button.selected { color: #e6c76d !important; border-bottom-color: #e6c76d !important; }
+a { color: #a3c6d8 !important; }
+code, pre, .gradio-container code { font-family: 'IBM Plex Mono', monospace !important; background: #1e2b24 !important; color: #a3c6d8 !important; }
+table { border-color: #3a4a40 !important; }
+th { background: #1e2b24 !important; color: #e6c76d !important; font-family: 'IBM Plex Mono', monospace !important; }
+td { border-color: #3a4a40 !important; color: #ece7da !important; }
+/* live backend status box */
+.statbox { border: 1px solid #3a4a40; border-radius: 2px; padding: 12px 14px; background: #19251f; font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
+.stat-head { color: #e6c76d; text-transform: uppercase; letter-spacing: .12em; font-size: 10px; margin-bottom: 9px; }
+.ag { padding: 2px 0; }
+.ag.ok { color: #7fd1a3; }
+.ag.run { color: #e6c76d; animation: blink 1s infinite; }
+.ag.idle { color: #4a5a50; }
+.stat-note { color: #d99a86; margin-top: 8px; font-size: 11px; }
+.tracebox { border: 1px dashed #3a4a40; border-radius: 2px; padding: 10px 12px; margin-top: 10px; background: #16211b; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #a9b3a8; line-height: 1.65; }
+@keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
+"""
+
 with gr.Blocks(title="MathPaper AI") as demo:
+    gr.HTML(f"<style>{CSS}</style>")   # theme, version-independent
     gr.Markdown(
         "# MathPaper AI\n"
         "*Experimental approach to math intuition* — an agentic RAG system that "
-        "explains concepts, derivations, and proofs from research papers.\n\n"
+        "explains concepts, derivations and proofs from research papers.\n\n"
         "Answers are grounded in **the paper** (retrieved chunks) *and* **external "
         "references** (Wikipedia · Encyclopedia of Mathematics · ProofWiki · "
-        "MathWorld), and rendered in **LaTeX**. Runs are saved to "
-        "`Maths_Rag output` on Drive."
+        "MathWorld), rendered in **LaTeX**. Runs save to `Maths_Rag output` on Drive."
     )
 
     with gr.Accordion("📄 Paper — upload your own, or use the demo", open=False):
@@ -313,17 +392,19 @@ with gr.Blocks(title="MathPaper AI") as demo:
             q1 = gr.Textbox(label="Your question", value=SAMPLES[0], scale=3)
             m1 = gr.Dropdown(MODEL_CHOICES, value=DEFAULT_A, label="Language model", scale=1)
             f1 = gr.Checkbox(label="force tool lookup", value=True, scale=1)
-            ask1 = gr.Button("Ask", variant="primary", scale=1)
+            b1 = gr.Button("Ask", variant="primary", scale=1)
         gr.Examples(SAMPLES, inputs=q1)
-        gr.Markdown("## Answer")
-        ans1 = gr.Markdown(latex_delimiters=LATEX)
         with gr.Row():
-            trace1 = gr.Markdown()
-            tools1 = gr.Markdown()
+            with gr.Column(scale=3):
+                gr.Markdown("## Answer")
+                ans1 = gr.Markdown(latex_delimiters=LATEX)
+            with gr.Column(scale=2):
+                stat1 = gr.HTML()
+                tools1 = gr.Markdown()
         with gr.Accordion("Retrieved paper evidence", open=False):
             ev1 = gr.Markdown()
-        ask1.click(run_ask, [q1, m1, f1], [ans1, trace1, tools1, ev1])
-        q1.submit(run_ask, [q1, m1, f1], [ans1, trace1, tools1, ev1])
+        b1.click(run_ask, [q1, m1, f1], [ans1, stat1, tools1, ev1])
+        q1.submit(run_ask, [q1, m1, f1], [ans1, stat1, tools1, ev1])
 
     with gr.Tab("Compare two models"):
         with gr.Row():
@@ -331,37 +412,40 @@ with gr.Blocks(title="MathPaper AI") as demo:
             ma = gr.Dropdown(MODEL_CHOICES, value=DEFAULT_A, label="Model A", scale=1)
             mb = gr.Dropdown(MODEL_CHOICES, value=DEFAULT_B, label="Model B", scale=1)
             f2 = gr.Checkbox(label="force tool lookup", value=True, scale=1)
-            ask2 = gr.Button("Compare", variant="primary", scale=1)
+            b2 = gr.Button("Compare", variant="primary", scale=1)
         gr.Examples(SAMPLES, inputs=q2)
         with gr.Row():
             with gr.Column():
                 gr.Markdown("#### Model A")
                 ansA = gr.Markdown(latex_delimiters=LATEX)
-                traceA = gr.Markdown()
+                trA = gr.Markdown()
             with gr.Column():
                 gr.Markdown("#### Model B")
                 ansB = gr.Markdown(latex_delimiters=LATEX)
-                traceB = gr.Markdown()
-        ask2.click(run_compare, [q2, ma, mb, f2], [ansA, traceA, ansB, traceB])
+                trB = gr.Markdown()
+        b2.click(run_compare, [q2, ma, mb, f2], [ansA, trA, ansB, trB])
 
     with gr.Tab("📊 Evaluate models"):
-        gr.Markdown(
-            "Score several language models on a question set with reference-free "
-            "metrics (citation validity / groundedness / hallucination), then rank them."
-        )
+        gr.Markdown("Score several language models on a question set with "
+                    "reference-free metrics, then rank them.")
         with gr.Row():
             eq = gr.Textbox(label="Questions (one per line)",
                             value="\n".join(SAMPLES), lines=5, scale=2)
             em = gr.CheckboxGroup(MODEL_CHOICES, value=[DEFAULT_A, DEFAULT_B],
                                   label="Models to evaluate", scale=1)
-        eb = gr.Button("Run evaluation", variant="primary")
+        b3 = gr.Button("Run evaluation", variant="primary")
         board = gr.Markdown()
         table = gr.Dataframe(
             headers=["model", "question", "composite", "cite_valid",
                      "grounded", "halluc", "agents", "latency_s"],
             label="Per-question detail", wrap=True)
-        eb.click(run_evaluation, [eq, em], [board, table])
+        b3.click(run_evaluation, [eq, em], [board, table])
 
 
 if __name__ == "__main__":
-    demo.queue().launch(share=True)
+    # Gradio 6 wants css on launch(); older versions accept it on Blocks.
+    try:
+        demo.queue().launch(share=True, css=CSS)
+    except TypeError:
+        demo.css = CSS
+        demo.queue().launch(share=True)
