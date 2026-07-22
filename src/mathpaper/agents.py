@@ -202,17 +202,30 @@ class EvidenceVerificationAgent:
 class ExplanationGeneratorAgent:
     def run(self, state: AgentState) -> AgentState:
         system = (
-            f"Explain for a {state.expertise}-level reader. Use ONLY the provided "
-            "evidence. Cite chunk ids like [chunk_3]. Break derivations into steps. "
-            "If evidence does not support a claim, say so instead of guessing."
+            f"Explain for a {state.expertise}-level reader.\n"
+            "GROUNDING: use ONLY the provided evidence. Cite paper chunks inline as "
+            "[chunk_3]. When you use a background definition, name its source inline "
+            "(e.g. 'as defined in Wikipedia'). If the evidence does not support a "
+            "claim, say so instead of guessing.\n"
+            "MATH FORMATTING: write ALL mathematics in LaTeX. Use $...$ for inline "
+            "math and $$...$$ for display equations on their own line. Never write "
+            "math as plain text — write $\\sigma^2$, not sigma^2; $D_{\\mathrm{KL}}"
+            "(q\\|p)$, not D_KL(q||p). Break derivations into numbered steps, each "
+            "with its equation on a display line."
         )
+        # pass background WITH source labels so the model can attribute them
+        background = [
+            {"concept": k.get("concept"), "source": k.get("source_name", "external"),
+             "text": k.get("text", "")}
+            for k in state.external_knowledge
+        ]
         prompt = (
             f"Question: {state.resolved_question}\n\n"
-            f"Evidence: {json.dumps(state.evidence)}\n\n"
-            f"Background: {json.dumps(state.external_knowledge)}"
+            f"Paper evidence: {json.dumps(state.evidence)}\n\n"
+            f"Background definitions (from external reference tools): {json.dumps(background)}"
         )
         state.answer = call_llm(system, prompt, model="strong")
-        state.log("Generator")
+        state.log("Generator", f"{len(state.evidence)} chunks + {len(background)} refs")
         return state
 
 
