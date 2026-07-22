@@ -1,32 +1,54 @@
-"""Tests the reference-lookup tool with a mocked network layer (no real HTTP)."""
+"""Tests the multi-source reference lookup with a mocked network layer."""
 from mathpaper import tools
 
 
-def _install_fake(monkeypatch, extract="A definition.", typ="standard", found=True):
-    def fake_get(url, timeout=8):
+def _fake_json(search_hit=True, extract="A precise definition of the concept in question here."):
+    def inner(url, timeout=8):
         if "list=search" in url:
-            return {"query": {"search": ([{"title": "Some Title"}] if found else [])}}
-        return {"extract": extract, "type": typ,
-                "content_urls": {"desktop": {"page": "https://en.wikipedia.org/wiki/X"}}}
-    monkeypatch.setattr(tools, "_get", fake_get)
+            return {"query": {"search": ([{"title": "Some Title"}] if search_hit else [])}}
+        return {"query": {"pages": {"1": {"extract": extract}}}}
+    return inner
 
 
-def test_lookup_returns_definition(monkeypatch):
-    _install_fake(monkeypatch, extract="KL divergence measures distribution difference.")
-    hit = tools.wikipedia_lookup("KL divergence")
+def test_mediawiki_lookup_returns_definition(monkeypatch):
+    monkeypatch.setattr(tools, "_get_json", _fake_json())
+    hit = tools.mediawiki_lookup("wikipedia", "KL divergence")
     assert hit is not None
-    assert "divergence" in hit["text"].lower()
-    assert hit["source"].startswith("https://")
+    assert hit["source_name"] == "Wikipedia"
+    assert hit["source"].startswith("https://en.wikipedia.org/wiki/")
 
 
-def test_disambiguation_is_skipped(monkeypatch):
-    _install_fake(monkeypatch, typ="disambiguation")
-    # disambiguation on the direct title, but search fallback also returns same -> None
-    assert tools.wikipedia_lookup("Mercury") is None
+def test_lookup_falls_through_to_next_source(monkeypatch):
+    def selective(url, timeout=8):
+        if "list=search" in url:
+            if "en.wikipedia.org" in url:
+                return {"query": {"search": []}}          # wikipedia misses
+            return {"query": {"search": [{"title": "T"}]}}  # next source hits
+        return {"query": {"pages": {"1": {"extract":
+                "A rigorous definition from a mathematics encyclopedia source."}}}}
+    monkeypatch.setattr(tools, "_get_json", selective)
+    monkeypatch.setattr(tools, "_get_text", lambda u, timeout=8: "")
+    hit = tools.math_reference_lookup("obscure concept")
+    assert hit is not None
+    assert hit["source_name"] != "Wikipedia"
 
 
 def test_network_failure_returns_none(monkeypatch):
     def boom(url, timeout=8):
         raise OSError("no network")
-    monkeypatch.setattr(tools, "_get", boom)
-    assert tools.wikipedia_lookup("anything") is None
+    monkeypatch.setattr(tools, "_get_json", boom)
+    monkeypatch.setattr(tools, "_get_text", boom)
+    assert tools.math_reference_lookup("anything") is None
+
+
+def test_stub_results_are_skipped(monkeypatch):
+    monkeypatch.setattr(tools, "_get_json", _fake_json(extract="Short."))
+    monkeypatch.setattr(tools, "_get_text", lambda u, timeout=8: "")
+    assert tools.math_reference_lookup("x") is None   # too short -> treated as stub
+
+
+def test_arxiv_parses_entries(monkeypatch):
+    xml = "<entry><title>A Paper On Divergence</title><id>http://arxiv.org/abs/1234</id></entry>"
+    monkeypatch.setattr(tools, "_get_text", lambda u, timeout=8: xml)
+    papers = tools.arxiv_lookup("divergence")
+    assert papers and papers[0]["source"] == "http://arxiv.org/abs/1234"

@@ -11,7 +11,7 @@ import json
 import re
 
 from .retrieval import HybridRetriever
-from .tools import wikipedia_lookup
+from .tools import math_reference_lookup, wikipedia_lookup  # noqa: F401
 
 
 # ----------------------------------------------------------------------
@@ -143,9 +143,9 @@ class PaperRetrievalAgent:
 class MathKnowledgeAgent:
     """Fills prerequisite gaps the paper assumes (e.g. KL divergence definition).
 
-    Prefers a REAL external source (Wikipedia) over the LLM's memory, so the
-    definition is grounded and attributable. Falls back to the LLM only if the
-    lookup returns nothing (offline, obscure concept, etc.)."""
+    Prefers REAL external references (Wikipedia, Encyclopedia of Mathematics,
+    ProofWiki, MathWorld, Wikibooks) over the LLM's memory, so definitions are
+    grounded and citable. Falls back to the LLM only when no source has it."""
 
     SYSTEM = (
         "You are a mathematical reference. Give a precise, textbook-style "
@@ -153,25 +153,26 @@ class MathKnowledgeAgent:
     )
 
     def run(self, state: AgentState) -> AgentState:
-        grounded, invented = 0, 0
+        sourced, invented = [], 0
         for concept in state.missing:
-            hit = wikipedia_lookup(concept)
+            hit = math_reference_lookup(concept)
             if hit:
                 state.external_knowledge.append({
                     "concept": concept, "text": hit["text"],
                     "source": hit["source"],
+                    "source_name": hit.get("source_name", "external"),
                 })
-                grounded += 1
+                sourced.append(hit.get("source_name", "external"))
             else:
-                # fallback: LLM definition, clearly marked as unsourced
                 definition = call_llm(self.SYSTEM, concept, model="strong")
                 state.external_knowledge.append({
                     "concept": concept, "text": definition,
-                    "source": "LLM (no external source found)",
+                    "source": "", "source_name": "LLM (no external source found)",
                 })
                 invented += 1
+        detail = ", ".join(sourced) if sourced else "none"
         state.log("MathKnowledge",
-                  f"{grounded} from Wikipedia, {invented} from LLM fallback")
+                  f"{len(sourced)} sourced ({detail}), {invented} LLM fallback")
         state.missing = []
         return state
 
