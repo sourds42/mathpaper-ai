@@ -137,8 +137,13 @@ def _status_md(done, current, elapsed, model, note=""):
 
 def _tools_md(state):
     md = "### Tool-sourced background\n"
+    searched = getattr(state, "searched_concepts", None)
+    if searched:
+        md += f"\n*searched:* `{'`, `'.join(searched)}`\n"
     if not state.external_knowledge:
-        return md + "\n_No external lookup was needed for this question._"
+        return md + ("\n_No external source returned a usable definition._"
+                     if searched else
+                     "\n_No external lookup was needed for this question._")
     for k in state.external_knowledge:
         md += f"\n**{k.get('concept','')}** — *{k.get('source_name','external')}*  \n"
         md += f"{k.get('text','')[:320]}\n"
@@ -157,13 +162,39 @@ def _evidence_md(state):
     return md
 
 
-def _force_tool(state, question):
+def _extract_concepts(question, model_tag):
+    """Identify the mathematical concept(s) a question is about, so the reference
+    tool searches for the right thing. Asks the model, falls back to a regex."""
+    try:
+        raw = llm.call_llm(
+            'Name the 1-2 key mathematical concepts in the question. Reply ONLY '
+            'a JSON list of short concept names, e.g. ["KL divergence"]. '
+            'No equations, no sentences.',
+            question, model="small")
+        from mathpaper.agents import safe_json
+        data = safe_json(f'{{"c": {raw.strip()}}}' if raw.strip().startswith("[")
+                         else raw, {"c": []})
+        items = data.get("c") if isinstance(data, dict) else data
+        out = [str(x).strip() for x in (items or []) if str(x).strip()][:2]
+        if out:
+            return out
+    except Exception:
+        pass
+    c = re.sub(r"(?i)^(why|how|what|when|where)\s+(is|are|does|do|use|used)\s+", "", question)
+    c = re.sub(r"(?i)\s*(in|from)\s+equation.*$", "", c)
+    c = re.sub(r"(?i)\b(instead of|rather than)\b.*$", "", c).strip(" ?.,")
+    return [c] if c else []
+
+
+def _force_tool(state, question, model_tag):
+    """Run the reference tool regardless of the verifier, then regenerate the
+    answer so it actually uses what was fetched. Records what was searched."""
     from mathpaper.agents import MathKnowledgeAgent, ExplanationGeneratorAgent
-    c = re.sub(r"(?i)^(why|how|what)\s+(is|are|does|do|use)\s+", "", question)
-    c = re.sub(r"(?i)\s*(in|from)\s+equation.*$", "", c).strip(" ?.")
-    if not c:
+    concepts = _extract_concepts(question, model_tag)
+    state.searched_concepts = concepts          # for UI reporting
+    if not concepts:
         return state
-    state.missing = [c]
+    state.missing = concepts
     MathKnowledgeAgent().run(state)
     ExplanationGeneratorAgent().run(state)
     return state
@@ -187,10 +218,10 @@ def run_ask(question, model_tag, force_tool):
         try:
             planner = _planner_for(model_tag)
             st = planner.run(q, on_step=on_step)
-            if force_tool and not st.external_knowledge:
+            if force_tool:
                 shared["current"] = "Math Knowledge"
-                shared["note"] = "forcing external reference lookup…"
-                st = _force_tool(st, q)
+                shared["note"] = "looking up external references…"
+                st = _force_tool(st, q, model_tag)
                 shared["note"] = ""
             if shared["current"]:
                 shared["done"].append(shared["current"])
@@ -255,8 +286,8 @@ def run_compare(question, model_a, model_b, force_tool):
         try:
             planner = _planner_for(tag)
             st = planner.run(q)
-            if force_tool and not st.external_knowledge:
-                st = _force_tool(st, q)
+            if force_tool:
+                st = _force_tool(st, q, tag)
             dt = time.time() - t0
             _save_run({"time_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
                        "paper": STATE["name"], "model": tag, "question": q,
@@ -338,37 +369,30 @@ def run_evaluation(questions_text, selected_models, progress=gr.Progress()):
 
 # ---------------- theme (matches the original demo palette) ----------------
 CSS = """
-@import url('https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap');
-.gradio-container, .gradio-container * { font-family: 'STIX Two Text', Georgia, serif !important; }
-.gradio-container { background: #16211b !important; color: #ece7da !important; max-width: 1180px !important; }
-.gradio-container h1 { font-size: 2.4rem !important; font-weight: 600 !important; color: #ece7da !important; }
-.gradio-container h2, .gradio-container h3, .gradio-container h4 { color: #ece7da !important; }
-.gradio-container p, .gradio-container li, .gradio-container span, .gradio-container label { color: #ece7da !important; }
-.gradio-container em { color: #a9b3a8 !important; }
-.block, .form, .gr-box, .gr-panel { background: #19251f !important; border-color: #3a4a40 !important; border-radius: 2px !important; }
-input, textarea, .gr-input, .gr-text-input { background: #1e2b24 !important; color: #ece7da !important; border-color: #3a4a40 !important; border-radius: 2px !important; }
-button.primary, .gr-button-primary { background: #e6c76d !important; color: #16211b !important; border: none !important; border-radius: 2px !important; font-family: 'IBM Plex Mono', monospace !important; font-weight: 500 !important; }
-button.secondary, .gr-button { background: transparent !important; color: #a9b3a8 !important; border: 1px solid #3a4a40 !important; border-radius: 2px !important; font-family: 'IBM Plex Mono', monospace !important; }
-.tab-nav button { color: #a9b3a8 !important; font-family: 'IBM Plex Mono', monospace !important; }
-.tab-nav button.selected { color: #e6c76d !important; border-bottom-color: #e6c76d !important; }
-a { color: #a3c6d8 !important; }
-code, pre, .gradio-container code { font-family: 'IBM Plex Mono', monospace !important; background: #1e2b24 !important; color: #a3c6d8 !important; }
-table { border-color: #3a4a40 !important; }
-th { background: #1e2b24 !important; color: #e6c76d !important; font-family: 'IBM Plex Mono', monospace !important; }
-td { border-color: #3a4a40 !important; color: #ece7da !important; }
-/* live backend status box */
-.statbox { border: 1px solid #3a4a40; border-radius: 2px; padding: 12px 14px; background: #19251f; font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
-.stat-head { color: #e6c76d; text-transform: uppercase; letter-spacing: .12em; font-size: 10px; margin-bottom: 9px; }
+/* only the live-status widget; everything else uses Gradio's default theme */
+.statbox { border: 1px solid var(--border-color-primary); border-radius: 6px;
+           padding: 12px 14px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.stat-head { opacity: .7; text-transform: uppercase; letter-spacing: .1em;
+             font-size: 10px; margin-bottom: 9px; }
 .ag { padding: 2px 0; }
-.ag.ok { color: #7fd1a3; }
-.ag.run { color: #e6c76d; animation: blink 1s infinite; }
-.ag.idle { color: #4a5a50; }
-.stat-note { color: #d99a86; margin-top: 8px; font-size: 11px; }
-.tracebox { border: 1px dashed #3a4a40; border-radius: 2px; padding: 10px 12px; margin-top: 10px; background: #16211b; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #a9b3a8; line-height: 1.65; }
-@keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
+.ag.ok  { color: #22c55e; }
+.ag.run { color: #6366f1; font-weight: 600; animation: blink 1s infinite; }
+.ag.idle { opacity: .4; }
+.stat-note { color: #f59e0b; margin-top: 8px; font-size: 11px; }
+.tracebox { border: 1px dashed var(--border-color-primary); border-radius: 6px;
+            padding: 10px 12px; margin-top: 10px; font-family: ui-monospace, Menlo, monospace;
+            font-size: 11px; opacity: .85; line-height: 1.65; }
+@keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: .5 } }
 """
 
-with gr.Blocks(title="MathPaper AI") as demo:
+THEME = gr.themes.Soft()   # Gradio's default blue palette
+
+try:
+    _blocks = gr.Blocks(title="MathPaper AI", theme=THEME)
+except TypeError:            # Gradio 6 moved theme to launch()
+    _blocks = gr.Blocks(title="MathPaper AI")
+
+with _blocks as demo:
     gr.HTML(f"<style>{CSS}</style>")   # theme, version-independent
     gr.Markdown(
         "# MathPaper AI\n"
@@ -444,8 +468,4 @@ with gr.Blocks(title="MathPaper AI") as demo:
 
 if __name__ == "__main__":
     # Gradio 6 wants css on launch(); older versions accept it on Blocks.
-    try:
-        demo.queue().launch(share=True, css=CSS)
-    except TypeError:
-        demo.css = CSS
-        demo.queue().launch(share=True)
+    demo.queue().launch(share=True)
